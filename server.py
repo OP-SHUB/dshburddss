@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 import os
@@ -20,6 +19,8 @@ TOKEN_DIR = os.path.join(os.path.sep, 'tmp', 'cn31_tokens')
 LIVE_FILE = os.path.join(TOKEN_DIR, 'live_tokens.txt')
 SERVED_FILE = os.path.join(TOKEN_DIR, 'served_tokens.txt')
 EXPIRED_FILE = os.path.join(TOKEN_DIR, 'expired_tokens.txt')
+RECEIVED_COUNT_FILE = os.path.join(TOKEN_DIR, 'received_count.txt')
+SERVED_COUNT_FILE = os.path.join(TOKEN_DIR, 'served_count.txt')
 
 os.makedirs(TOKEN_DIR, exist_ok=True)
 
@@ -29,6 +30,19 @@ def _append_file(path, token):
     with _file_lock:
         with open(path, 'a') as f:
             f.write(token + '\n')
+
+def _write_count(path, count):
+    with _file_lock:
+        with open(path, 'w') as f:
+            f.write(str(count))
+
+def _read_count(path):
+    with _file_lock:
+        try:
+            with open(path, 'r') as f:
+                return int(f.read().strip())
+        except:
+            return 0
 
 _lock = threading.Lock()
 _token_queue = deque()
@@ -115,6 +129,7 @@ def receive_token():
 
     if added:
         _append_file(LIVE_FILE, token)
+        _write_count(RECEIVED_COUNT_FILE, _stats["received"])
 
     return jsonify({
         "status": "ok",
@@ -143,6 +158,7 @@ def get_token():
         _write_expired(expired_token)
     if token:
         _write_served(token)
+        _write_count(SERVED_COUNT_FILE, _stats["served"])
         return jsonify({"token": token, "remaining": remaining, "age_seconds": age}), 200
     return jsonify({"error": "no tokens available", "remaining": 0}), 404
 
@@ -165,6 +181,8 @@ def get_tokens_bulk():
             _stats["last_served"] = datetime.now().isoformat()
     for t in tokens:
         _write_served(t)
+    if tokens:
+        _write_count(SERVED_COUNT_FILE, _stats["served"])
 
     return jsonify({
         "tokens": tokens,
@@ -176,12 +194,9 @@ def get_tokens_bulk():
 def status():
     with _lock:
         elapsed = time.time() - _stats["start_time"]
-        live_count = _file_lines(LIVE_FILE)
-        served_count = _file_lines(SERVED_FILE)
-        expired_count = _file_lines(EXPIRED_FILE)
-        total_received = max(_stats["received"], live_count)
-        total_served = max(_stats["served"], served_count)
-        total_expired = max(_stats["expired"], expired_count)
+        total_received = max(_stats["received"], _read_count(RECEIVED_COUNT_FILE))
+        total_served = max(_stats["served"], _read_count(SERVED_COUNT_FILE))
+        total_expired = max(_stats["expired"], _file_lines(EXPIRED_FILE))
         rate = total_received / (elapsed / 60) if elapsed > 0 else 0
         recent_tokens = []
         for item in list(_token_queue)[-5:]:
@@ -221,8 +236,8 @@ def token_count():
     with _lock:
         result = jsonify({
             "queue_size": len(_token_queue),
-            "total_received": max(_stats["received"], _file_lines(LIVE_FILE)),
-            "total_served": max(_stats["served"], _file_lines(SERVED_FILE)),
+            "total_received": max(_stats["received"], _read_count(RECEIVED_COUNT_FILE)),
+            "total_served": max(_stats["served"], _read_count(SERVED_COUNT_FILE)),
         }), 200
     return result
 
@@ -241,7 +256,7 @@ def health():
             "ok": True,
             "uptime": round(time.time() - _stats["start_time"], 1),
             "queue_size": len(_token_queue),
-            "total_received": max(_stats["received"], _file_lines(LIVE_FILE)),
+            "total_received": max(_stats["received"], _read_count(RECEIVED_COUNT_FILE)),
         })
     return result
 
