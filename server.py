@@ -4,6 +4,7 @@ import os
 import time
 import threading
 import argparse
+import tempfile
 from collections import deque
 from datetime import datetime
 from flask import Flask, jsonify, request, render_template, send_from_directory
@@ -33,8 +34,10 @@ def _append_file(path, token):
 
 def _write_count(path, count):
     with _file_lock:
-        with open(path, 'w') as f:
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
             f.write(str(count))
+        os.replace(tmp, path)
 
 def _read_count(path):
     with _file_lock:
@@ -114,6 +117,8 @@ def receive_token():
         return jsonify({"error": "invalid token"}), 400
 
     added = False
+    qsize = 0
+    total_recv = 0
     with _lock:
         if token not in _token_seen:
             _token_seen.add(token)
@@ -121,21 +126,22 @@ def receive_token():
             _stats["received"] += 1
             _stats["last_received"] = datetime.now().isoformat()
             added = True
-            qs = len(_token_queue)
-            if qs > _stats["peak_queue"]:
-                _stats["peak_queue"] = qs
+            qsize = len(_token_queue)
+            total_recv = _stats["received"]
+            if qsize > _stats["peak_queue"]:
+                _stats["peak_queue"] = qsize
         else:
             _stats["duplicates"] += 1
 
     if added:
         _append_file(LIVE_FILE, token)
-        _write_count(RECEIVED_COUNT_FILE, _stats["received"])
+        _write_count(RECEIVED_COUNT_FILE, total_recv)
 
     return jsonify({
         "status": "ok",
         "added": added,
-        "queue_size": len(_token_queue),
-        "total_received": _stats["received"],
+        "queue_size": qsize,
+        "total_received": total_recv,
     }), 200
 
 @app.route("/api/get-token", methods=["GET"])
@@ -144,6 +150,7 @@ def get_token():
     remaining = 0
     age = 0
     expired_token = None
+    served_count = 0
     with _lock:
         expired_token = _pop_one_expired()
         if _token_queue:
@@ -153,12 +160,13 @@ def get_token():
             remaining = len(_token_queue)
             age = round(time.time() - entry["ts"], 1)
             _stats["served"] += 1
+            served_count = _stats["served"]
             _stats["last_served"] = datetime.now().isoformat()
     if expired_token:
         _write_expired(expired_token)
     if token:
         _write_served(token)
-        _write_count(SERVED_COUNT_FILE, _stats["served"])
+        _write_count(SERVED_COUNT_FILE, served_count)
         return jsonify({"token": token, "remaining": remaining, "age_seconds": age}), 200
     return jsonify({"error": "no tokens available", "remaining": 0}), 404
 
@@ -168,6 +176,8 @@ def get_tokens_bulk():
     n = max(1, min(n, 100))
 
     tokens = []
+    qsize = 0
+    served_count = 0
     with _lock:
         for _ in range(n):
             if _token_queue:
@@ -178,16 +188,18 @@ def get_tokens_bulk():
             else:
                 break
         if tokens:
+            served_count = _stats["served"]
+            qsize = len(_token_queue)
             _stats["last_served"] = datetime.now().isoformat()
     for t in tokens:
         _write_served(t)
     if tokens:
-        _write_count(SERVED_COUNT_FILE, _stats["served"])
+        _write_count(SERVED_COUNT_FILE, served_count)
 
     return jsonify({
         "tokens": tokens,
         "count": len(tokens),
-        "remaining": len(_token_queue),
+        "remaining": qsize,
     }), 200
 
 @app.route("/api/status", methods=["GET"])
